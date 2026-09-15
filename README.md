@@ -4,8 +4,8 @@ A lightweight AutoHotkey v2 utility that adds rounded corners to the edges of yo
 
 The tool is designed to provide a clean, modern rounded-corner appearance while remaining lightweight and unobtrusive.</br>
 
-[![LATEST](https://img.shields.io/github/v/tag/playnoxify/AHK-Screen-Rounded-Corners?label=LATEST&sort=semver)](https://github.com/playnoxify/AHK-Screen-Rounded-Corners/releases/latest)
-
+[![LATEST](https://img.shields.io/github/v/tag/playnoxify/AHK-Screen-Rounded-Corners?label=LATEST&sort=semver)](https://github.com/playnoxify/AHK-Screen-Rounded-Corners/releases/latest)</br>
+<img src="https://raw.githubusercontent.com/playnoxify/AHK-Screen-Rounded-Corners/refs/heads/main/.github/example.png" width="50%" alt="Features">
 # Features<br/>
 🖥️ Rounded corners on all connected monitors<br/>
 🔄 Automatically detects display configuration changes<br/>

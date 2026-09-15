@@ -2,7 +2,9 @@
 
 A lightweight AutoHotkey v2 utility that adds rounded corners to the edges of your Windows screen by placing small transparent overlay windows in each corner.
 
-The tool is designed to provide a clean, modern rounded-corner appearance while remaining lightweight and unobtrusive.
+The tool is designed to provide a clean, modern rounded-corner appearance while remaining lightweight and unobtrusive.</br>
+
+[![LATEST](https://img.shields.io/github/v/tag/playnoxify/AHK-Screen-Rounded-Corners?label=LATEST&sort=semver)](https://github.com/playnoxify/AHK-Screen-Rounded-Corners/releases/latest)
 
 # Features<br/>
 🖥️ Rounded corners on all connected monitors<br/>

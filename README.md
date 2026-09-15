@@ -19,11 +19,11 @@ Corner Sizes
 
 The tray menu provides several predefined corner sizes:
 
-10px
-15px
-25px
-32px
-40px
+- 10px
+- 15px
+- 25px
+- 32px
+- 40px
 
 The currently selected size is automatically marked in the tray menu.
 

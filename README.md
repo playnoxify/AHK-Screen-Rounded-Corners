@@ -54,8 +54,8 @@ Exe file is compiled with ahk2exe.
 
 The application will appear in the Windows system tray.
 
-## How to start automatically with Windows?
-1.Right-click the tray icon and enable:
+## How to start automatically with Windows?<br/>
+1.Right-click the tray icon and enable:<br/>
 2.Start with Windows
 
 The application will then register itself in the current user's Windows startup configuration.

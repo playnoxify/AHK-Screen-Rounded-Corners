@@ -4,17 +4,17 @@ A lightweight AutoHotkey v2 utility that adds rounded corners to the edges of yo
 
 The tool is designed to provide a clean, modern rounded-corner appearance while remaining lightweight and unobtrusive.
 
-# Features
-- 🖥️ Rounded corners on all connected monitors
-- 🔄 Automatically detects display configuration changes
-- 🎯 Supports multiple monitors
-- ⚙️ Adjustable corner radius
-- 🪟 Overlay windows stay above the taskbar and other windows
-- 🖱️ Click-through overlays — they do not interfere with mouse input
-- 🚀 Optional Start with Windows functionality
-- 💾 Saves the selected corner size between launches
-- 🔃 Refresh overlays manually from the tray menu or with Ctrl + Alt + R
-- 📌 Runs quietly in the Windows system tray
+# Features<br/>
+🖥️ Rounded corners on all connected monitors<br/>
+🔄 Automatically detects display configuration changes<br/>
+🎯 Supports multiple monitors<br/>
+⚙️ Adjustable corner radius<br/>
+🪟 Overlay windows stay above the taskbar and other windows<br/>
+🖱️ Click-through overlays — they do not interfere with mouse input<br/>
+🚀 Optional Start with Windows functionality<br/>
+💾 Saves the selected corner size between launches<br/>
+🔃 Refresh overlays manually from the tray menu or with Ctrl + Alt + R<br/>
+📌 Runs quietly in the Windows system tray
 
 ## Corner Sizes
 
@@ -32,10 +32,10 @@ The currently selected size is automatically marked in the tray menu.
 
 ### The application runs in the Windows system tray and provides quick access to:
 
-- Corner Size — select the desired corner radius
-- Start with Windows — enable or disable automatic startup
-- Refresh — recreate the corner overlays
-- Exit — close the application
+Corner Size — select the desired corner radius<br/>
+Start with Windows — enable or disable automatic startup<br/>
+Refresh — recreate the corner overlays<br/>
+Exit — close the application
 
 # How It Works
 

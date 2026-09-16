@@ -3,8 +3,9 @@
 Persistent
 
 ; ====================================================================
-; Rounded Screen Corners for Windows
-; Uses the same region method as your brightness GUI
+; Rounded Screen Corners for Windows 0.3
+; Soft Corners version - GDI+ per-pixel alpha
+; Fixed: exit crash, optimized: single shared keep-on-top timer
 ; ====================================================================
 
 ; ====================================================================
@@ -13,6 +14,17 @@ Persistent
 global cornerRadius := 25
 global overlayGuis := []
 global configFile := A_ScriptDir . "\RoundedScreen.ini"
+global pToken := 0
+global masterTimerStarted := false
+
+; ====================================================================
+; Initialize GDI+
+; ====================================================================
+InitGDIPlus()
+; Note: GdiplusShutdown deliberately NOT called on exit.
+; Calling it during process teardown is unreliable (0xc0000005) -
+; the OS reclaims all GDI+/GDI resources automatically when the
+; process terminates, so an explicit shutdown call is not required.
 
 ; ====================================================================
 ; Initialize
@@ -27,6 +39,16 @@ OnMessage(0x02E0, OnDpiChanged)     ; WM_DPICHANGED
 
 ; Also check periodically for monitor changes
 SetTimer(CheckMonitorChanges, 2000)
+
+; ====================================================================
+; GDI+ Init
+; ====================================================================
+InitGDIPlus() {
+    global pToken
+    si := Buffer(24, 0)
+    NumPut("UInt", 1, si)
+    DllCall("gdiplus\GdiplusStartup", "UPtr*", &pToken, "UPtr", si.Ptr, "UPtr", 0)
+}
 
 ; ====================================================================
 ; Create System Tray Menu
@@ -68,7 +90,7 @@ CreateTrayMenu() {
 ; Create Overlay Windows
 ; ====================================================================
 CreateOverlays() {
-    global overlayGuis
+    global overlayGuis, masterTimerStarted
     
     ; Destroy existing overlays
     for guiObj in overlayGuis {
@@ -90,6 +112,14 @@ CreateOverlays() {
         CreateCornerOverlay(left, top, "TR", width, height)
         CreateCornerOverlay(left, top, "BL", width, height)
         CreateCornerOverlay(left, top, "BR", width, height)
+    }
+    
+    ; Start ONE shared timer for all corner windows (huge CPU saving
+    ; vs. one timer per window). Only started once - subsequent
+    ; refreshes just repopulate overlayGuis, which the loop reads live.
+    if (!masterTimerStarted) {
+        SetTimer(KeepAllOnTop, 30)
+        masterTimerStarted := true
     }
 }
 
@@ -117,105 +147,148 @@ CreateCornerOverlay(monX, monY, corner, monWidth, monHeight) {
             y := monY + monHeight - size
     }
     
-    ; Create GUI - must be layered for proper rendering above the cursor
+    ; Create layered GUI window
     cornerGui := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x80000")  ; WS_EX_LAYERED
-    cornerGui.BackColor := "000000"
     
-    ; Show GUI
+    ; Show GUI (position/size only - content drawn via UpdateLayeredWindow)
     cornerGui.Show("x" x " y" y " w" size " h" size " NA")
     
     hwnd := cornerGui.Hwnd
     
-    ; Apply rounded corner shape
-    ApplyCornerShape(hwnd, size, corner)
-    
-    ; CRITICAL: Set the correct extended styles
-    ; WS_EX_LAYERED (0x80000) - już ustawione przez +E0x80000
-    ; WS_EX_TRANSPARENT (0x20) - allows clicks THROUGH the window
+    ; Make window click-through (WS_EX_TRANSPARENT) - clicks pass through
     exStyle := DllCall("GetWindowLong", "Ptr", hwnd, "Int", -20, "Ptr")
     exStyle |= 0x80000 | 0x20  ; WS_EX_LAYERED | WS_EX_TRANSPARENT
     DllCall("SetWindowLong", "Ptr", hwnd, "Int", -20, "Ptr", exStyle)
     
-    ; Set transparency (255 = opaque)
-    DllCall("SetLayeredWindowAttributes", "Ptr", hwnd, "UInt", 0, "UChar", 255, "UInt", 2)
-    
-    ; KEY: OnMessage for WM_NCHITTEST must be before SetWindowLong
-    ; Subclass the window to return HTTRANSPARENT
-    DllCall("SetWindowSubclass", "Ptr", hwnd, "Ptr", CallbackCreate(SubclassProc), "Ptr", hwnd, "Ptr", 0)
-    
-    ; Setup aggressive timer for ALL corners
-    SetTimer(() => ForceWindowOnTop(hwnd), 30)
+    ; Draw the soft-edged rounded corner with per-pixel alpha
+    DrawCornerAlpha(hwnd, x, y, size, corner)
     
     overlayGuis.Push(cornerGui)
 }
 
 ; ====================================================================
-; Subclass Procedure - przepuszcza kliknięcia, ale renderuje nad kursorem
+; Draw Rounded Corner with Soft (Anti-Aliased) Edge using GDI+
 ; ====================================================================
-SubclassProc(hwnd, uMsg, wParam, lParam, uIdSubclass, dwRefData) {
-    static WM_NCHITTEST := 0x0084
-    static HTTRANSPARENT := -1
+DrawCornerAlpha(hwnd, x, y, size, corner) {
+    screenDC := 0
+    hbm := 0
+    memDC := 0
+    hOldBmp := 0
+    pGraphics := 0
+    pPath := 0
+    pBrush := 0
     
-    ; For WM_NCHITTEST, return HTTRANSPARENT
-    if (uMsg = WM_NCHITTEST) {
-        return HTTRANSPARENT
+    try {
+        ; Create 32bpp top-down DIB section for per-pixel alpha
+        screenDC := DllCall("GetDC", "Ptr", 0, "Ptr")
+        hbm := CreateAlphaBitmap(size, size)
+        memDC := DllCall("CreateCompatibleDC", "Ptr", screenDC, "Ptr")
+        hOldBmp := DllCall("SelectObject", "Ptr", memDC, "Ptr", hbm, "Ptr")
+        
+        ; Create GDI+ graphics on the memory DC
+        DllCall("gdiplus\GdipCreateFromHDC", "Ptr", memDC, "UPtr*", &pGraphics)
+        
+        ; High quality anti-aliasing - key to the soft edge
+        DllCall("gdiplus\GdipSetSmoothingMode", "Ptr", pGraphics, "Int", 4)
+        DllCall("gdiplus\GdipSetPixelOffsetMode", "Ptr", pGraphics, "Int", 2)
+        DllCall("gdiplus\GdipSetCompositingQuality", "Ptr", pGraphics, "Int", 2)
+        
+        ; Clear to fully transparent
+        DllCall("gdiplus\GdipGraphicsClear", "Ptr", pGraphics, "UInt", 0x00000000)
+        
+        ; Build path: full square MINUS circle (the "hole") -> Alternate fill mode
+        DllCall("gdiplus\GdipCreatePath", "Int", 0, "Ptr*", &pPath)
+        
+        ; Outer square
+        DllCall("gdiplus\GdipAddPathRectangle", "Ptr", pPath
+            , "Float", 0, "Float", 0, "Float", size, "Float", size)
+        
+        ; Circle (hole) positioned according to corner
+        switch corner {
+            case "TL":
+                ex := 0,     ey := 0
+            case "TR":
+                ex := -size, ey := 0
+            case "BL":
+                ex := 0,     ey := -size
+            default: ; BR
+                ex := -size, ey := -size
+        }
+        DllCall("gdiplus\GdipAddPathEllipse", "Ptr", pPath
+            , "Float", ex, "Float", ey, "Float", size * 2, "Float", size * 2)
+        
+        ; Fill the path (square minus circle) with solid black
+        DllCall("gdiplus\GdipCreateSolidFill", "UInt", 0xFF000000, "UPtr*", &pBrush)
+        DllCall("gdiplus\GdipFillPath", "Ptr", pGraphics, "Ptr", pBrush, "Ptr", pPath)
+        
+        ; Push the rendered bitmap to the layered window
+        UpdateLayeredWindowAlpha(hwnd, memDC, x, y, size, size)
+    } finally {
+        ; Guaranteed cleanup even if something above throws -
+        ; this is what prevents leaked GDI+ objects/handles over time
+        if (pBrush)
+            DllCall("gdiplus\GdipDeleteBrush", "Ptr", pBrush)
+        if (pPath)
+            DllCall("gdiplus\GdipDeletePath", "Ptr", pPath)
+        if (pGraphics)
+            DllCall("gdiplus\GdipDeleteGraphics", "Ptr", pGraphics)
+        if (memDC) {
+            if (hOldBmp)
+                DllCall("SelectObject", "Ptr", memDC, "Ptr", hOldBmp)
+            DllCall("DeleteDC", "Ptr", memDC)
+        }
+        if (hbm)
+            DllCall("DeleteObject", "Ptr", hbm)
+        if (screenDC)
+            DllCall("ReleaseDC", "Ptr", 0, "Ptr", screenDC)
     }
-    
-    ; For other messages, call the default procedure
-    return DllCall("DefSubclassProc", "Ptr", hwnd, "UInt", uMsg, "Ptr", wParam, "Ptr", lParam, "Ptr")
 }
 
 ; ====================================================================
-; Apply Corner Shape - inverse of a rounded rectangle
+; Helper: Create 32bpp Top-Down DIB Section (for alpha bitmap)
 ; ====================================================================
-ApplyCornerShape(hwnd, size, corner) {
-    ; Create a region that is a square MINUS a rounded corner
-    ; This gives us a black corner with a rounded edge
+CreateAlphaBitmap(w, h) {
+    bi := Buffer(40, 0)
+    NumPut("UInt", 40, bi, 0)      ; biSize
+    NumPut("Int", w, bi, 4)        ; biWidth
+    NumPut("Int", -h, bi, 8)       ; biHeight (negative = top-down)
+    NumPut("UShort", 1, bi, 12)    ; biPlanes
+    NumPut("UShort", 32, bi, 14)   ; biBitCount
+    NumPut("UInt", 0, bi, 16)      ; biCompression (BI_RGB)
     
-    ; Full square
-    hFullSquare := DllCall("CreateRectRgn", "Int", 0, "Int", 0, "Int", size, "Int", size, "Ptr")
+    return DllCall("CreateDIBSection", "Ptr", 0, "Ptr", bi, "UInt", 0
+        , "Ptr*", 0, "Ptr", 0, "UInt", 0, "Ptr")
+}
+
+; ====================================================================
+; Helper: Update Layered Window with per-pixel alpha (soft edges)
+; ====================================================================
+UpdateLayeredWindowAlpha(hwnd, hdcSrc, x, y, w, h) {
+    ptSrc := Buffer(8, 0)   ; POINT {0,0}
+    ptDst := Buffer(8, 0)
+    NumPut("Int", x, ptDst, 0)
+    NumPut("Int", y, ptDst, 4)
     
-    ; Rounded rectangle to subtract (depending on the corner)
-    switch corner {
-        case "TL":  ; Top-Left - subtract the bottom-right rounded area
-            hRounded := DllCall("CreateRoundRectRgn"
-                , "Int", 0, "Int", 0
-                , "Int", size * 2 + 1, "Int", size * 2 + 1
-                , "Int", size * 2, "Int", size * 2, "Ptr")
-                
-        case "TR":  ; Top-Right - subtract the bottom-left rounded area
-            hRounded := DllCall("CreateRoundRectRgn"
-                , "Int", -size, "Int", 0
-                , "Int", size + 1, "Int", size * 2 + 1
-                , "Int", size * 2, "Int", size * 2, "Ptr")
-                
-        case "BL":  ; Bottom-Left - subtract the top-right rounded area
-            hRounded := DllCall("CreateRoundRectRgn"
-                , "Int", 0, "Int", -size
-                , "Int", size * 2 + 1, "Int", size + 1
-                , "Int", size * 2, "Int", size * 2, "Ptr")
-                
-        case "BR":  ; Bottom-Right - subtract the top-left rounded area
-            hRounded := DllCall("CreateRoundRectRgn"
-                , "Int", -size, "Int", -size
-                , "Int", size + 1, "Int", size + 1
-                , "Int", size * 2, "Int", size * 2, "Ptr")
-    }
+    sz := Buffer(8, 0)
+    NumPut("Int", w, sz, 0)
+    NumPut("Int", h, sz, 4)
     
-    ; Create the resulting region
-    hResult := DllCall("CreateRectRgn", "Int", 0, "Int", 0, "Int", 0, "Int", 0, "Ptr")
+    blend := Buffer(4, 0)
+    NumPut("UChar", 0,   blend, 0)  ; AC_SRC_OVER
+    NumPut("UChar", 0,   blend, 1)  ; Flags
+    NumPut("UChar", 255, blend, 2)  ; SourceConstantAlpha
+    NumPut("UChar", 1,   blend, 3)  ; AC_SRC_ALPHA
     
-    ; Subtract the rounded region from the full square
-    ; RGN_DIFF (4) = A minus B
-    DllCall("CombineRgn", "Ptr", hResult, "Ptr", hFullSquare, "Ptr", hRounded, "Int", 4)
-    
-    ; Apply the region to the window
-    DllCall("SetWindowRgn", "Ptr", hwnd, "Ptr", hResult, "Int", 1)
-    
-    ; Cleanup
-    DllCall("DeleteObject", "Ptr", hFullSquare)
-    DllCall("DeleteObject", "Ptr", hRounded)
-    ; hResult nie usuwamy - system przejmuje własność po SetWindowRgn
+    DllCall("UpdateLayeredWindow"
+        , "Ptr", hwnd
+        , "Ptr", 0
+        , "Ptr", ptDst
+        , "Ptr", sz
+        , "Ptr", hdcSrc
+        , "Ptr", ptSrc
+        , "UInt", 0
+        , "Ptr", blend
+        , "UInt", 2)  ; ULW_ALPHA
 }
 
 ; ====================================================================
@@ -233,30 +306,26 @@ SetCornerSize(size) {
 ; Refresh Overlays
 ; ====================================================================
 RefreshOverlays(*) {
-    global overlayGuis
-    
-    ; Stop all timers before destroying
-    for guiObj in overlayGuis {
-        try {
-            ; Timers are associated with the hwnd, so it is enough to clear them
-        }
-    }
-    
     CreateOverlays()
 }
 
 ; ====================================================================
-; Force Window to Stay On Top (for taskbar conflict)
+; Keep ALL corner windows on top - single shared timer tick
+; (replaces the old one-timer-per-window approach, which spawned
+; up to 16 independent 15ms timers on a 4-monitor setup)
 ; ====================================================================
-ForceWindowOnTop(hwnd) {
-    try {
-        if !DllCall("IsWindow", "Ptr", hwnd)
-            return
-        
-        ; Set window above taskbar
-        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1  ; HWND_TOPMOST
-            , "Int", 0, "Int", 0, "Int", 0, "Int", 0
-            , "UInt", 0x0013)  ; SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+KeepAllOnTop() {
+    global overlayGuis
+    for guiObj in overlayGuis {
+        try {
+            hwnd := guiObj.Hwnd
+            if !DllCall("IsWindow", "Ptr", hwnd)
+                continue
+            
+            DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1  ; HWND_TOPMOST
+                , "Int", 0, "Int", 0, "Int", 0, "Int", 0
+                , "UInt", 0x0003 | 0x0010)  ; SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        }
     }
 }
 
@@ -310,13 +379,11 @@ global lastScreenWidth := A_ScreenWidth
 global lastScreenHeight := A_ScreenHeight
 
 OnDisplayChange(wParam, lParam, msg, hwnd) {
-    ; Wait a bit for Windows to finish updating displays
     SetTimer(() => RefreshOverlays(), -500)
     return 0
 }
 
 OnDpiChanged(wParam, lParam, msg, hwnd) {
-    ; DPI changed - refresh overlays
     SetTimer(() => RefreshOverlays(), -500)
     return 0
 }
@@ -328,7 +395,6 @@ CheckMonitorChanges() {
     currentWidth := A_ScreenWidth
     currentHeight := A_ScreenHeight
     
-    ; Check if monitor configuration changed
     if (currentCount != lastMonitorCount 
         || currentWidth != lastScreenWidth 
         || currentHeight != lastScreenHeight) {
@@ -337,7 +403,6 @@ CheckMonitorChanges() {
         lastScreenWidth := currentWidth
         lastScreenHeight := currentHeight
         
-        ; Refresh overlays after a short delay
         SetTimer(() => RefreshOverlays(), -300)
     }
 }

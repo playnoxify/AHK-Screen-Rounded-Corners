@@ -1,11 +1,11 @@
 #Requires AutoHotkey v2.0+
 #SingleInstance Force
 Persistent
-
+A_IconTip := "Display Rounded Corners"
 ; ====================================================================
-; Rounded Screen Corners for Windows 0.3
+; Rounded Screen Corners for Windows 0.5
 ; Soft Corners version - GDI+ per-pixel alpha
-; Fixed: exit crash, optimized: single shared keep-on-top timer
+; New: Windows 11 style tray menu (Mica backdrop, rounded corners)
 ; ====================================================================
 
 ; ====================================================================
@@ -16,6 +16,31 @@ global overlayGuis := []
 global configFile := A_ScriptDir . "\RoundedScreen.ini"
 global pToken := 0
 global masterTimerStarted := false
+global refreshBusy := false
+global refreshPending := false
+
+; MouseGetPos must report SCREEN coordinates. The default is coordinates
+; relative to the active window, which put the tray popup in the top-left.
+CoordMode("Mouse", "Screen")
+
+; ====================================================================
+; Tray popup menu - look and state
+; ====================================================================
+global mmScale := A_ScreenDPI / 96
+global mmMica := VerCompare(A_OSVersion, "10.0.22621") >= 0   ; backdrop needs Windows 11 22H2+
+global mmBackdrop := 2          ; 2 = Mica, 3 = Acrylic (closest to Explorer context menu), 4 = Mica Alt
+global mmBg := mmMica ? "000000" : "2B2B2B"   ; pure black is see-through on the extended frame
+global mmHover := "3A3A3A"
+global mmTextColor := "FFFFFF"
+global mmSepColor := "444444"
+global mmIconFont := VerCompare(A_OSVersion, "10.0.22000") >= 0 ? "Segoe Fluent Icons" : "Segoe MDL2 Assets"
+
+global menuPopups := []
+global menuHitMap := Map()
+global menuRowSeq := 0
+global menuOpenTick := 0
+global menuClosedTick := 0
+global menuEverActive := false
 
 ; ====================================================================
 ; Initialize GDI+
@@ -30,8 +55,11 @@ InitGDIPlus()
 ; Initialize
 ; ====================================================================
 LoadSettings()
-CreateTrayMenu()
+CreateTrayMenu()   ; native menu, kept as a fallback (Shift + right click)
 CreateOverlays()
+
+; Replace the native tray menu with the custom Mica popup
+OnMessage(0x404, TrayNotify)
 
 ; Monitor for display changes
 OnMessage(0x007E, OnDisplayChange)  ; WM_DISPLAYCHANGE
@@ -39,6 +67,13 @@ OnMessage(0x02E0, OnDpiChanged)     ; WM_DPICHANGED
 
 ; Also check periodically for monitor changes
 SetTimer(CheckMonitorChanges, 2000)
+
+; Watch for Windows 11 shell overlays (Start Menu, Action Center,
+; Search, Widgets) which render above even topmost windows. We can't
+; stay above them while they're open, but we CAN force our corners
+; to snap back the instant they close, instead of waiting for a click.
+global shellOverlayWasOpen := false
+SetTimer(CheckShellOverlay, 100)
 
 ; ====================================================================
 ; GDI+ Init
@@ -51,7 +86,7 @@ InitGDIPlus() {
 }
 
 ; ====================================================================
-; Create System Tray Menu
+; Create System Tray Menu (native - fallback only)
 ; ====================================================================
 CreateTrayMenu() {
     A_TrayMenu.Delete()
@@ -84,6 +119,352 @@ CreateTrayMenu() {
     A_TrayMenu.Add()
     A_TrayMenu.Add("Refresh", (*) => RefreshOverlays())
     A_TrayMenu.Add("Exit", (*) => ExitApp())
+}
+
+; ====================================================================
+; Tray icon click handler - opens the custom popup instead of the
+; native menu. Returning 0 blocks the built-in menu.
+; ====================================================================
+TrayNotify(wParam, lParam, msg, hwnd) {
+    global menuPopups, menuClosedTick
+    
+    ; 0x205 = WM_RBUTTONUP, 0x202 = WM_LBUTTONUP
+    if (lParam != 0x205 && lParam != 0x202)
+        return
+    
+    ; Shift + right click = native fallback menu (safety net)
+    if (lParam = 0x205 && GetKeyState("Shift", "P"))
+        return
+    
+    ; Clicking the icon while the popup is open deactivates it first,
+    ; so treat a click right after closing as a "toggle off"
+    if (menuPopups.Length || A_TickCount - menuClosedTick < 250) {
+        CloseMenu()
+        return 0
+    }
+    
+    ShowTrayPopup()
+    return 0
+}
+
+; ====================================================================
+; Menu definition
+; ====================================================================
+BuildMenuItems() {
+    global cornerRadius
+    
+    sizeItems := []
+    for s in [10, 15, 25, 32, 40]
+        sizeItems.Push(Map("text", s "px", "checked", (cornerRadius = s), "action", SetCornerSize.Bind(s)))
+    
+    return [
+        Map("text", "Corner Size", "icon", Chr(0xE7F4), "children", sizeItems),
+        Map("sep", true),
+        Map("text", "Start with Windows", "checked", CheckAutoStart(), "action", ToggleAutoStart),
+        Map("sep", true),
+        Map("text", "Refresh", "icon", Chr(0xE72C), "action", RefreshOverlays),
+        Map("text", "Exit", "icon", Chr(0xE7E8), "action", (*) => ExitApp())
+    ]
+}
+
+; ====================================================================
+; Show the main popup near the cursor
+; ====================================================================
+ShowTrayPopup() {
+    global menuPopups, menuHitMap, menuOpenTick, menuEverActive, mmScale
+    
+    ; Make sure nothing is left over
+    for P in menuPopups
+        DestroyPopup(P)
+    menuPopups := []
+    menuHitMap := Map()
+    
+    CoordMode("Mouse", "Screen")
+    mmScale := A_ScreenDPI / 96
+    MouseGetPos(&mx, &my)
+    P := CreatePopup(BuildMenuItems(), 0, Round(232 * mmScale))
+    GetWorkAreaAt(mx, my, &wl, &wt, &wr, &wb)
+    
+    ; Open towards the cursor, flip when there is no room
+    x := mx
+    y := my
+    if (x + P.w > wr)
+        x := Min(mx, wr) - P.w
+    if (y + P.h > wb)
+        y := Min(my, wb) - P.h
+    x := Max(x, wl)
+    y := Max(y, wt)
+    
+    P.x := x
+    P.y := y
+    P.gui.Show("x" x " y" y " w" P.w " h" P.h)
+    DllCall("SetForegroundWindow", "Ptr", P.gui.Hwnd)
+    
+    menuPopups.Push(P)
+    menuOpenTick := A_TickCount
+    menuEverActive := false
+    SetTimer(MenuTick, 30)
+}
+
+; ====================================================================
+; Build one popup window (main menu or submenu)
+; ====================================================================
+CreatePopup(items, level, w) {
+    global mmScale, mmBg, mmTextColor, mmSepColor, mmIconFont, menuHitMap, menuRowSeq
+    
+    s := mmScale
+    g := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
+    g.MarginX := 0
+    g.MarginY := 0
+    g.BackColor := mmBg
+    ApplyMicaStyle(g.Hwnd)
+    
+    padX := Round(4 * s)
+    padTop := Round(5 * s)
+    rowW := w - 2 * padX
+    itemH := Round(32 * s)
+    iconW := Round(36 * s)
+    arrowW := Round(28 * s)
+    d := Round(8 * s)   ; diameter of the rounded hover highlight corners
+    
+    P := {gui: g, rows: [], level: level, w: w, h: 0, x: 0, y: 0, hlRow: 0, subRow: 0, alive: true, padTop: padTop}
+    y := padTop
+    
+    for item in items {
+        if (item.Has("sep")) {
+            sepH := Round(9 * s)
+            lineH := Max(1, Round(s))
+            inset := Round(2 * s)
+            g.Add("Text", "x" (padX + inset) " y" (y + (sepH - lineH) // 2) " w" (rowW - 2 * inset) " h" lineH " Background" mmSepColor)
+            y += sepH
+            continue
+        }
+        
+        ; Icon column: check mark for toggled items, otherwise the item icon
+        glyph := ""
+        if (item.Has("checked") && item["checked"])
+            glyph := Chr(0xE73E)
+        else if (item.Has("icon"))
+            glyph := item["icon"]
+        
+        hasSub := item.Has("children")
+        labelW := rowW - iconW - (hasSub ? arrowW : 0)
+        
+        ; Three adjacent controls (icon | label | arrow) that all change
+        ; colour together on hover, so no overlapping transparency is needed
+        g.SetFont("s11 c" mmTextColor, mmIconFont)
+        ic := g.Add("Text", "x" padX " y" y " w" iconW " h" itemH " Center +0x200 +0x100 Background" mmBg, glyph)
+        g.SetFont("s10 c" mmTextColor, "Segoe UI")
+        lb := g.Add("Text", "x" (padX + iconW) " y" y " w" labelW " h" itemH " +0x200 +0x100 Background" mmBg, item["text"])
+        ctrls := [ic, lb]
+        RoundCtrl(ic, iconW, itemH, d, "L")
+        
+        if (hasSub) {
+            g.SetFont("s8 c" mmTextColor, mmIconFont)
+            ar := g.Add("Text", "x" (padX + iconW + labelW) " y" y " w" arrowW " h" itemH " Center +0x200 +0x100 Background" mmBg, Chr(0xE76C))
+            ctrls.Push(ar)
+            RoundCtrl(ar, arrowW, itemH, d, "R")
+        } else {
+            RoundCtrl(lb, labelW, itemH, d, "R")
+        }
+        
+        menuRowSeq += 1
+        row := {id: menuRowSeq, popup: P, item: item, y: y, ctrls: ctrls}
+        P.rows.Push(row)
+        for c in ctrls {
+            menuHitMap[c.Hwnd] := row
+            c.OnEvent("Click", MenuRowClicked.Bind(row))
+        }
+        y += itemH
+    }
+    
+    P.h := y + padTop
+    return P
+}
+
+; ====================================================================
+; Mica / dark mode / rounded corners for a popup window
+; ====================================================================
+ApplyMicaStyle(hwnd) {
+    global mmMica, mmBackdrop
+    
+    DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "UInt", 20, "Int*", 1, "UInt", 4)          ; dark mode
+    DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "UInt", 33, "Int*", 2, "UInt", 4)          ; rounded corners
+    DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "UInt", 34, "UInt*", 0x3A3A3A, "UInt", 4)  ; subtle border
+    
+    if (!mmMica)
+        return
+    
+    ; Extend the frame over the whole window so the backdrop shows through,
+    ; then pick the system backdrop type
+    margins := Buffer(16, 0xFF)   ; four Int32 values of -1
+    DllCall("dwmapi\DwmExtendFrameIntoClientArea", "Ptr", hwnd, "Ptr", margins)
+    DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "UInt", 38, "Int*", mmBackdrop, "UInt", 4)
+}
+
+; ====================================================================
+; Round only the outer edge of a row control (L = left, R = right)
+; so the three adjacent controls of a row form one rounded highlight
+; ====================================================================
+RoundCtrl(ctrl, w, h, d, side) {
+    if (side = "L")
+        rgn := DllCall("CreateRoundRectRgn", "Int", 0, "Int", 0, "Int", w + d + 1, "Int", h + 1, "Int", d, "Int", d, "Ptr")
+    else
+        rgn := DllCall("CreateRoundRectRgn", "Int", -d, "Int", 0, "Int", w + 1, "Int", h + 1, "Int", d, "Int", d, "Ptr")
+    DllCall("SetWindowRgn", "Ptr", ctrl.Hwnd, "Ptr", rgn, "Int", true)
+}
+
+; ====================================================================
+; Work area of the monitor that contains a point
+; ====================================================================
+GetWorkAreaAt(px, py, &l, &t, &r, &b) {
+    Loop MonitorGetCount() {
+        MonitorGet(A_Index, &ml, &mt, &mr, &mb)
+        if (px >= ml && px < mr && py >= mt && py < mb) {
+            MonitorGetWorkArea(A_Index, &l, &t, &r, &b)
+            return
+        }
+    }
+    MonitorGetWorkArea(MonitorGetPrimary(), &l, &t, &r, &b)
+}
+
+; ====================================================================
+; Tick while the popup is open: close on focus loss, hover, submenus
+; ====================================================================
+MenuTick() {
+    global menuPopups, menuHitMap, menuEverActive, menuOpenTick
+    
+    if (!menuPopups.Length) {
+        SetTimer(MenuTick, 0)
+        return
+    }
+    
+    ; Close when none of our popups is active any more
+    anyActive := false
+    for P in menuPopups {
+        if (WinActive("ahk_id " P.gui.Hwnd)) {
+            anyActive := true
+            break
+        }
+    }
+    if (anyActive) {
+        menuEverActive := true
+    } else if (menuEverActive || A_TickCount - menuOpenTick > 600) {
+        CloseMenu()
+        return
+    }
+    
+    ; Which row is under the cursor?
+    MouseGetPos(,,, &ctrlHwnd, 2)
+    hoverRow := menuHitMap.Has(ctrlHwnd) ? menuHitMap[ctrlHwnd] : 0
+    
+    for P in menuPopups.Clone() {
+        if (!P.alive)
+            continue
+        
+        if (hoverRow && hoverRow.popup == P) {
+            curId := P.hlRow ? P.hlRow.id : 0
+            if (curId != hoverRow.id) {
+                SetHighlight(P, hoverRow)
+                subId := P.subRow ? P.subRow.id : 0
+                if (subId != hoverRow.id) {
+                    CloseChildren(P)
+                    if (hoverRow.item.Has("children"))
+                        OpenSubmenu(P, hoverRow)
+                }
+            }
+        } else if (!P.subRow && P.hlRow) {
+            SetHighlight(P, 0)
+        }
+    }
+}
+
+SetHighlight(P, row) {
+    if (P.hlRow)
+        PaintRow(P.hlRow, false)
+    P.hlRow := row
+    if (row)
+        PaintRow(row, true)
+}
+
+PaintRow(row, on) {
+    global mmBg, mmHover
+    color := on ? mmHover : mmBg
+    for c in row.ctrls {
+        c.Opt("Background" color)
+        c.Redraw()
+    }
+}
+
+; ====================================================================
+; Submenus
+; ====================================================================
+OpenSubmenu(P, row) {
+    global menuPopups, mmScale
+    
+    s := mmScale
+    cw := Round(124 * s)
+    overlap := Round(6 * s)
+    C := CreatePopup(row.item["children"], P.level + 1, cw)
+    
+    x := P.x + P.w - overlap
+    y := P.y + row.y - C.padTop
+    GetWorkAreaAt(P.x + P.w, P.y + row.y, &wl, &wt, &wr, &wb)
+    if (x + cw > wr)
+        x := P.x - cw + overlap
+    if (y + C.h > wb)
+        y := wb - C.h
+    if (y < wt)
+        y := wt
+    
+    C.x := x
+    C.y := y
+    C.gui.Show("NA x" x " y" y " w" cw " h" C.h)
+    menuPopups.Push(C)
+    P.subRow := row
+}
+
+CloseChildren(P) {
+    global menuPopups
+    keep := []
+    for Q in menuPopups {
+        if (Q.level > P.level)
+            DestroyPopup(Q)
+        else
+            keep.Push(Q)
+    }
+    menuPopups := keep
+    P.subRow := 0
+}
+
+DestroyPopup(P) {
+    global menuHitMap
+    P.alive := false
+    for row in P.rows {
+        for c in row.ctrls {
+            try menuHitMap.Delete(c.Hwnd)
+        }
+    }
+    try P.gui.Destroy()
+}
+
+CloseMenu(*) {
+    global menuPopups, menuHitMap, menuClosedTick
+    SetTimer(MenuTick, 0)
+    for P in menuPopups
+        DestroyPopup(P)
+    menuPopups := []
+    menuHitMap := Map()
+    menuClosedTick := A_TickCount
+}
+
+MenuRowClicked(row, *) {
+    item := row.item
+    if (item.Has("children") || !item.Has("action"))
+        return
+    action := item["action"]
+    CloseMenu()
+    action.Call()
 }
 
 ; ====================================================================
@@ -148,7 +529,7 @@ CreateCornerOverlay(monX, monY, corner, monWidth, monHeight) {
     }
     
     ; Create layered GUI window
-    cornerGui := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x80000")  ; WS_EX_LAYERED
+    cornerGui := Gui("+AlwaysOnTop +ToolWindow -Caption +E0x80000", "RSC_CornerOverlay")  ; WS_EX_LAYERED, titled so strays can be found
     
     ; Show GUI (position/size only - content drawn via UpdateLayeredWindow)
     cornerGui.Show("x" x " y" y " w" size " h" size " NA")
@@ -306,7 +687,54 @@ SetCornerSize(size) {
 ; Refresh Overlays
 ; ====================================================================
 RefreshOverlays(*) {
-    CreateOverlays()
+    ; Debounce: a display change fires WM_DISPLAYCHANGE once PER WINDOW
+    ; (every overlay gets it) and several timers also call this function.
+    ; Re-arming the SAME timer collapses all of those into one rebuild.
+    SetTimer(DoRefreshOverlays, -150)
+}
+
+DoRefreshOverlays() {
+    global refreshBusy, refreshPending
+    
+    ; Never rebuild re-entrantly. An interrupted rebuild used to overwrite
+    ; the window list and leave live overlay windows that nothing tracked,
+    ; so even a manual Refresh could not remove them.
+    if (refreshBusy) {
+        refreshPending := true
+        return
+    }
+    
+    refreshBusy := true
+    try {
+        CreateOverlays()
+        DestroyStrayOverlays()
+    } finally {
+        refreshBusy := false
+    }
+    
+    if (refreshPending) {
+        refreshPending := false
+        SetTimer(DoRefreshOverlays, -150)
+    }
+}
+
+; ====================================================================
+; Safety net: close any overlay window that is not in the tracked list
+; (found by its window title)
+; ====================================================================
+DestroyStrayOverlays() {
+    global overlayGuis
+    
+    tracked := Map()
+    for g in overlayGuis {
+        try tracked[g.Hwnd] := true
+    }
+    
+    for hwnd in WinGetList("RSC_CornerOverlay ahk_class AutoHotkeyGUI ahk_pid " ProcessExist()) {
+        if (!tracked.Has(hwnd)) {
+            try DllCall("DestroyWindow", "Ptr", hwnd)
+        }
+    }
 }
 
 ; ====================================================================
@@ -371,6 +799,10 @@ ToggleAutoStart() {
 ; ====================================================================
 ^!r::RefreshOverlays()  ; Ctrl+Alt+R to refresh
 
+#HotIf menuPopups.Length > 0
+Esc::CloseMenu()        ; Esc closes the tray popup
+#HotIf
+
 ; ====================================================================
 ; Monitor Display Changes
 ; ====================================================================
@@ -405,4 +837,25 @@ CheckMonitorChanges() {
         
         SetTimer(() => RefreshOverlays(), -300)
     }
+}
+
+; ====================================================================
+; Detect Start Menu / Action Center / Search / Widgets closing
+; These render in a shell layer above ALL topmost windows while
+; open - nothing can be done about that. But the moment they close,
+; we force-recreate our overlays instead of relying on the regular
+; 30ms position timer, which can otherwise leave DWM's composition
+; surface for our windows stale until something else triggers a redraw.
+; ====================================================================
+CheckShellOverlay() {
+    global shellOverlayWasOpen
+    
+    isOpen := WinExist("ahk_class Windows.UI.Core.CoreWindow") ? true : false
+    
+    if (shellOverlayWasOpen && !isOpen) {
+        ; Just closed - snap corners back immediately
+        RefreshOverlays()
+    }
+    
+    shellOverlayWasOpen := isOpen
 }
